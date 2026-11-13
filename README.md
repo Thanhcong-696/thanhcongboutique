@@ -1,16 +1,34 @@
-# React + Vite
+# THANHCONG.BOUTIQUE
 
-This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
+Ứng dụng dùng React/Vite ở giao diện, Express ở API và SQL Server để lưu tài khoản. Mật khẩu được mã hóa trước khi lưu.
 
-Currently, two official plugins are available:
+## Use Case phân quyền
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Oxc](https://oxc.rs)
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/)
+Tài liệu tác nhân, sơ đồ Use Case, ma trận quyền và luồng nghiệp vụ cho khách hàng, nhân viên và admin nằm trong [USECASE_PHAN_QUYEN.md](./USECASE_PHAN_QUYEN.md).
 
-## React Compiler
+## Cấu hình SQL Server
 
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
+1. Database phải có schema trong `SQLQuery2.sql`. Script này **xóa và tạo lại** database `thanhcong_boutique`; chỉ chạy khi tạo mới và không có dữ liệu cần giữ.
+2. Chạy `SQLQuery5.sql` để thêm cột tên đăng nhập và chỉ mục duy nhất mà API đăng ký/đăng nhập cần. Đây là migration an toàn cho database hiện có.
+3. Sao chép `.env.example` thành `.env`. Mặc định, API dùng Windows Authentication với tài khoản Windows đang chạy Node.js:
 
-## Expanding the ESLint configuration
+   ```env
+   PORT=3001
+   DB_AUTHENTICATION=windows
+   DB_SERVER=localhost
+   DB_DATABASE=thanhcong_boutique
+   DB_ODBC_DRIVER=ODBC Driver 18 for SQL Server
+   DB_ENCRYPT=false
+   DB_TRUST_SERVER_CERTIFICATE=true
+   ```
 
-If you are developing a production application, we recommend using TypeScript with type-aware lint rules enabled. Check out the [TS template](https://github.com/vitejs/vite/tree/main/packages/create-vite/template-react-ts) for information on how to integrate TypeScript and [`typescript-eslint`](https://typescript-eslint.io) in your project.
+   Windows cần cài Microsoft ODBC Driver 17 hoặc 18. Nếu dùng SQL Login, đặt `DB_AUTHENTICATION=sql` và tự điền `DB_USER`/`DB_PASSWORD` trong `.env`. Có thể cấu hình `DB_INSTANCE` cho named instance hoặc `DB_PORT` cho cổng TCP. Không đưa thông tin đăng nhập thật vào Git.
+
+## Chạy ứng dụng
+
+```powershell
+npm install
+npm run dev
+```
+
+Lệnh này chạy API ở `http://localhost:3001` và giao diện Vite. Kiểm tra API/SQL Server tại `http://localhost:3001/api/health`; khi kết nối thành công, phản hồi có `status: "ok"`. Sau đó đăng ký trong giao diện; API sẽ lưu tài khoản vào `dbo.nguoi_dung`. Nếu không kết nối được, kiểm tra `.env`, trạng thái SQL Server, quyền tài khoản SQL và đã chạy migration `SQLQuery5.sql`.

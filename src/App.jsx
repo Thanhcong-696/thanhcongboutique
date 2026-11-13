@@ -16,7 +16,6 @@ const DEFAULT_PRODUCTS = [
 const DEFAULT_ACCOUNTS = [
   { id: "admin", username: "admin", email: "admin@thanhcong.com", password: "123456", role: "admin", name: "Quản trị viên", address: "", phone: "" },
   { id: "staff", username: "staff", email: "staff@thanhcong.com", password: "123456", role: "staff", name: "Nhân viên", address: "", phone: "" },
-  { id: "manager", username: "manager", email: "manager@thanhcong.com", password: "123456", role: "manager", name: "Quản lý cửa hàng", address: "", phone: "" },
 ];
 
 function readStorage(key, fallback) {
@@ -28,6 +27,21 @@ function readStorage(key, fallback) {
   }
 }
 
+async function apiRequest(path, options = {}) {
+  let response;
+  try {
+    response = await fetch(`/api${path}`, {
+      ...options,
+      headers: { "Content-Type": "application/json", ...options.headers },
+    });
+  } catch {
+    throw new Error("Không kết nối được máy chủ. Hãy kiểm tra API và SQL Server.");
+  }
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(data.message || "Yêu cầu không thành công.");
+  return data;
+}
+
 function money(value) {
   return Number(value || 0).toLocaleString("vi-VN") + " ₫";
 }
@@ -37,7 +51,13 @@ function makeId() {
 }
 
 function roleName(role) {
-  return role === "admin" ? "Quản trị viên" : role === "manager" ? "Quản lý" : role === "staff" ? "Nhân viên" : "Khách hàng";
+  const normalizedRole = normalizeRole(role);
+  return normalizedRole === "admin" ? "Quản trị viên" : normalizedRole === "staff" ? "Nhân viên" : "Khách hàng";
+}
+
+function normalizeRole(role) {
+  const normalizedRole = String(role || "customer").toLowerCase();
+  return normalizedRole === "manager" ? "staff" : normalizedRole;
 }
 
 function App() {
@@ -74,13 +94,17 @@ function App() {
 
   const [users, setUsers] = useState(() => {
     const saved = readStorage("users", []);
-    const result = [...saved];
+    const result = saved.map(user => ({ ...user, role: normalizeRole(user.role) }));
     DEFAULT_ACCOUNTS.forEach(a => { if (!result.some(u => u.id === a.id)) result.push(a); });
     return result;
   });
-  const [currentUser, setCurrentUser] = useState(() => readStorage("currentUser", null));
+  const [currentUser, setCurrentUser] = useState(() => {
+    const user = readStorage("currentUser", null);
+    return user ? { ...user, role: normalizeRole(user.role) } : user;
+  });
   const [authMode, setAuthMode] = useState("login");
   const [authData, setAuthData] = useState({ username: "", email: "", password: "", confirmPassword: "" });
+  const [isRegistering, setIsRegistering] = useState(false);
   const [accountForm, setAccountForm] = useState({ name: "", email: "", phone: "", address: "", oldPassword: "", newPassword: "", confirmNewPassword: "" });
 
   useEffect(() => localStorage.setItem("users", JSON.stringify(users)), [users]);
@@ -126,35 +150,63 @@ function App() {
   const completedRevenue = orders.filter(o => o.status === "Đã giao hàng").reduce((sum, o) => sum + Number(o.total || 0), 0);
   const confirmedRevenue = orders.filter(o => o.status !== "Đã hủy").reduce((sum, o) => sum + Number(o.total || 0), 0);
   const lowStockProducts = products.filter(p => Number(p.stock) <= 5);
-  const canManage = currentUser && ["admin", "staff", "manager"].includes(currentUser.role);
+  const canManage = currentUser && ["admin", "staff"].includes(currentUser.role);
   const canDelete = currentUser?.role === "admin";
-  const canManageUsers = currentUser?.role === "admin" || currentUser?.role === "manager";
+  const canManageUsers = currentUser?.role === "admin";
 
-  const login = () => {
+  const login = async () => {
     const username = authData.username.trim().toLowerCase();
     const password = authData.password;
     if (!username || !password) return alert("Vui lòng nhập tài khoản và mật khẩu!");
-    const user = users.find(u => (u.username?.toLowerCase() === username || u.email?.toLowerCase() === username) && u.password === password);
-    if (!user) return alert("Tài khoản hoặc mật khẩu không đúng!");
-    setCurrentUser(user);
-    setAuthData({ username: "", email: "", password: "", confirmPassword: "" });
-    alert("Đăng nhập thành công!");
-    navigate(["admin", "staff", "manager"].includes(user.role) ? "management" : "products");
+    try {
+      const user = await apiRequest("/auth/login", {
+        method: "POST",
+        body: JSON.stringify({ username, password }),
+      });
+      setCurrentUser(user);
+      setAuthData({ username: "", email: "", password: "", confirmPassword: "" });
+      alert("Đăng nhập thành công!");
+      navigate(["admin", "staff"].includes(user.role) ? "management" : "products");
+    } catch (error) {
+      const localStaff = DEFAULT_ACCOUNTS.find(account =>
+        (account.username === username || account.email === username) && account.password === password
+      );
+      if (localStaff) {
+        setCurrentUser(localStaff);
+        setAuthData({ username: "", email: "", password: "", confirmPassword: "" });
+        alert("Đăng nhập thành công!");
+        navigate("management");
+        return;
+      }
+      alert(error.message);
+    }
   };
 
-  const register = () => {
+  const register = async () => {
+    if (isRegistering) return;
     const username = authData.username.trim();
     const email = authData.email.trim().toLowerCase();
     if (!username || !email || !authData.password || !authData.confirmPassword) return alert("Vui lòng nhập đầy đủ thông tin!");
+    if (username.length > 50) return alert("Tên tài khoản tối đa 50 ký tự!");
     if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return alert("Email không hợp lệ!");
+    if (email.length > 150) return alert("Email tối đa 150 ký tự!");
     if (authData.password.length < 6) return alert("Mật khẩu phải có ít nhất 6 ký tự!");
     if (authData.password !== authData.confirmPassword) return alert("Mật khẩu xác nhận không khớp!");
-    if (users.some(u => u.username?.toLowerCase() === username.toLowerCase() || u.email?.toLowerCase() === email)) return alert("Tài khoản hoặc email đã tồn tại!");
-    const newUser = { id: makeId(), username, email, password: authData.password, role: "customer", name: username, address: "", phone: "" };
-    setUsers(old => [...old, newUser]);
-    alert("Đăng ký thành công! Bạn có thể đăng nhập ngay.");
-    setAuthMode("login");
-    setAuthData({ username: "", email: "", password: "", confirmPassword: "" });
+    setIsRegistering(true);
+    try {
+      const newUser = await apiRequest("/auth/register", {
+        method: "POST",
+        body: JSON.stringify({ username, email, password: authData.password }),
+      });
+      setUsers(old => [...old, newUser]);
+      alert("Đăng ký thành công! Tài khoản đã được lưu vào SQL Server.");
+      setAuthMode("login");
+      setAuthData({ username: "", email: "", password: "", confirmPassword: "" });
+    } catch (error) {
+      alert(error.message);
+    } finally {
+      setIsRegistering(false);
+    }
   };
 
   const logout = () => { setCurrentUser(null); navigate("home", true); alert("Đã đăng xuất!"); };
@@ -170,17 +222,21 @@ function App() {
     alert("Đã cập nhật thông tin tài khoản!");
   };
 
-  const changePassword = () => {
+  const changePassword = async () => {
     if (!currentUser) return;
     if (!accountForm.oldPassword || !accountForm.newPassword || !accountForm.confirmNewPassword) return alert("Vui lòng nhập đầy đủ thông tin đổi mật khẩu!");
-    if (accountForm.oldPassword !== currentUser.password) return alert("Mật khẩu hiện tại không đúng!");
     if (accountForm.newPassword.length < 6) return alert("Mật khẩu mới phải có ít nhất 6 ký tự!");
     if (accountForm.newPassword !== accountForm.confirmNewPassword) return alert("Xác nhận mật khẩu mới không khớp!");
-    const updated = { ...currentUser, password: accountForm.newPassword };
-    setUsers(old => old.map(u => u.id === currentUser.id ? updated : u));
-    setCurrentUser(updated);
-    setAccountForm(o => ({ ...o, oldPassword: "", newPassword: "", confirmNewPassword: "" }));
-    alert("Đổi mật khẩu thành công!");
+    try {
+      await apiRequest("/auth/change-password", {
+        method: "POST",
+        body: JSON.stringify({ username: currentUser.username, oldPassword: accountForm.oldPassword, newPassword: accountForm.newPassword }),
+      });
+      setAccountForm(o => ({ ...o, oldPassword: "", newPassword: "", confirmNewPassword: "" }));
+      alert("Đổi mật khẩu thành công!");
+    } catch (error) {
+      alert(error.message);
+    }
   };
 
   const buyProduct = product => {
@@ -275,7 +331,7 @@ function App() {
   const deleteOrder = id => { if (canDelete && window.confirm("Bạn có chắc muốn xóa đơn hàng?")) setOrders(old => old.filter(o => o.id !== id)); };
 
   const updateUserRole = (id, role) => {
-    if (!canManageUsers || id === currentUser.id) return;
+    if (!canManageUsers || id === currentUser.id || !["customer", "staff", "admin"].includes(role)) return;
     setUsers(old => old.map(u => u.id === id ? { ...u, role } : u));
   };
   const deleteUser = id => {
@@ -285,7 +341,7 @@ function App() {
   };
 
   const S = {
-    page: { minHeight: "100vh", background: "#f5f6fa", color: "#1f2937", fontFamily: "Arial, sans-serif" },
+    page: { minHeight: "100vh", background: "#f5f6fa", color: "#1f2937", fontFamily: "'Be Vietnam Pro', sans-serif" },
     header: { background: "#111827", color: "white", padding: "14px 30px", display: "flex", justifyContent: "space-between", alignItems: "center", gap: 15, flexWrap: "wrap", position: "sticky", top: 0, zIndex: 1000 },
     logo: { fontSize: 24, fontWeight: 800, cursor: "pointer" }, nav: { display: "flex", alignItems: "center", gap: 5, flexWrap: "wrap" },
     navButton: { border: "none", background: "transparent", color: "white", padding: "10px 12px", cursor: "pointer", borderRadius: 6, fontSize: 15 },
@@ -336,7 +392,7 @@ function App() {
   const detailProduct = products.find(p => p.id === selectedProductId);
   const productDetailPage = <main style={S.container}>{detailProduct ? <div style={{ ...S.tableBox, display: "grid", gridTemplateColumns: "minmax(280px,1fr) minmax(280px,1fr)", gap: 30 }}><img src={detailProduct.image} alt={detailProduct.name} style={{ width: "100%", maxHeight: 520, objectFit: "cover", borderRadius: 12 }} /><div><h1>{detailProduct.name}</h1><p style={S.price}>{money(detailProduct.price)}</p><p><strong>Danh mục:</strong> {detailProduct.category}</p><p><strong>Kích thước:</strong> {detailProduct.sizes || "S, M, L, XL"}</p><p><strong>Màu sắc:</strong> {detailProduct.colors || "Đen, Trắng"}</p><p><strong>Tồn kho:</strong> {detailProduct.stock}</p><p style={{ lineHeight: 1.7 }}>{detailProduct.description}</p><div style={{ marginTop: 20, textAlign: "center" }}><h3>📱 Quét QR để mở sản phẩm</h3><img src={qrImageUrl(detailProduct)} alt={`QR ${detailProduct.name}`} style={{ width: 200, height: 200, border: "1px solid #ddd", borderRadius: 10 }} /><p style={{ fontSize: 13, color: "#6b7280", wordBreak: "break-all" }}>{productUrl(detailProduct)}</p></div><button style={S.greenButton} disabled={!detailProduct.stock} onClick={() => buyProduct(detailProduct)}>Thêm vào giỏ hàng</button><button style={{ ...S.button, marginLeft: 8 }} onClick={() => toggleFavorite(detailProduct.id)}>{favorites.includes(detailProduct.id) ? "Bỏ yêu thích" : "Yêu thích"}</button></div></div> : <div style={S.tableBox}><p>Sản phẩm không tồn tại.</p></div>}</main>;
 
-  const loginPage = <main style={S.container}><div style={{ ...S.formBox, maxWidth: 500 }}><h2 style={{ textAlign: "center" }}>{authMode === "login" ? "Đăng nhập" : "Đăng ký"}</h2>{authMode === "login" ? <><input style={S.input} autoComplete="username" placeholder="Tài khoản hoặc Email" value={authData.username} onChange={e => setAuthData(o => ({ ...o, username: e.target.value }))} /><input style={S.input} type="password" autoComplete="current-password" placeholder="Mật khẩu" value={authData.password} onChange={e => setAuthData(o => ({ ...o, password: e.target.value }))} /><button style={{ ...S.button, width: "100%" }} onClick={login}>Đăng nhập</button><button style={{ ...S.whiteButton, width: "100%", marginTop: 10, border: "1px solid #111827" }} onClick={() => setAuthMode("register")}>Đăng ký tài khoản</button></> : <><input style={S.input} autoComplete="username" placeholder="Tên tài khoản" value={authData.username} onChange={e => setAuthData(o => ({ ...o, username: e.target.value }))} /><input style={S.input} type="email" autoComplete="email" placeholder="Email" value={authData.email} onChange={e => setAuthData(o => ({ ...o, email: e.target.value }))} /><input style={S.input} type="password" autoComplete="new-password" placeholder="Mật khẩu (ít nhất 6 ký tự)" value={authData.password} onChange={e => setAuthData(o => ({ ...o, password: e.target.value }))} /><input style={S.input} type="password" autoComplete="new-password" placeholder="Nhập lại mật khẩu" value={authData.confirmPassword} onChange={e => setAuthData(o => ({ ...o, confirmPassword: e.target.value }))} /><button style={{ ...S.button, width: "100%" }} onClick={register}>Đăng ký</button><button style={{ ...S.whiteButton, width: "100%", marginTop: 10, border: "1px solid #111827" }} onClick={() => setAuthMode("login")}>Quay lại đăng nhập</button></>}</div></main>;
+  const loginPage = <main style={S.container}><div style={{ ...S.formBox, maxWidth: 500 }}><h2 style={{ textAlign: "center" }}>{authMode === "login" ? "Đăng nhập" : "Đăng ký"}</h2>{authMode === "login" ? <><input style={S.input} autoComplete="username" placeholder="Tài khoản hoặc Email" value={authData.username} onChange={e => setAuthData(o => ({ ...o, username: e.target.value }))} /><input style={S.input} type="password" autoComplete="current-password" placeholder="Mật khẩu" value={authData.password} onChange={e => setAuthData(o => ({ ...o, password: e.target.value }))} /><button style={{ ...S.button, width: "100%" }} onClick={login}>Đăng nhập</button><button style={{ ...S.whiteButton, width: "100%", marginTop: 10, border: "1px solid #111827" }} onClick={() => setAuthMode("register")}>Đăng ký tài khoản</button></> : <><input style={S.input} autoComplete="username" maxLength={50} placeholder="Tên tài khoản" value={authData.username} onChange={e => setAuthData(o => ({ ...o, username: e.target.value }))} /><input style={S.input} type="email" autoComplete="email" maxLength={150} placeholder="Email" value={authData.email} onChange={e => setAuthData(o => ({ ...o, email: e.target.value }))} /><input style={S.input} type="password" autoComplete="new-password" placeholder="Mật khẩu (ít nhất 6 ký tự)" value={authData.password} onChange={e => setAuthData(o => ({ ...o, password: e.target.value }))} /><input style={S.input} type="password" autoComplete="new-password" placeholder="Nhập lại mật khẩu" value={authData.confirmPassword} onChange={e => setAuthData(o => ({ ...o, confirmPassword: e.target.value }))} /><button style={{ ...S.button, width: "100%", opacity: isRegistering ? 0.6 : 1 }} disabled={isRegistering} onClick={register}>{isRegistering ? "Đang đăng ký..." : "Đăng ký"}</button><button style={{ ...S.whiteButton, width: "100%", marginTop: 10, border: "1px solid #111827" }} onClick={() => setAuthMode("login")}>Quay lại đăng nhập</button></>}</div></main>;
 
   const accountPage = currentUser ? <main style={S.container}><h1>Tài khoản</h1><div style={S.profileCard}><div style={{ display: "flex", justifyContent: "space-between", gap: 15, flexWrap: "wrap" }}><div><h2>Xin chào, {currentUser.name || currentUser.username}</h2><p>Tài khoản: <strong>{currentUser.username}</strong></p></div><span style={S.badge}>{roleName(currentUser.role)}</span></div></div><div style={S.formBox}><h2>Thông tin tài khoản</h2><label>Họ và tên</label><input style={S.input} value={accountForm.name} onChange={e => setAccountForm(o => ({ ...o, name: e.target.value }))} /><label>Email</label><input style={S.input} type="email" value={accountForm.email} onChange={e => setAccountForm(o => ({ ...o, email: e.target.value }))} /><label>Số điện thoại</label><input style={S.input} value={accountForm.phone} onChange={e => setAccountForm(o => ({ ...o, phone: e.target.value }))} /><label>Địa chỉ</label><textarea style={{ ...S.input, minHeight: 100 }} value={accountForm.address} onChange={e => setAccountForm(o => ({ ...o, address: e.target.value }))} /><button style={S.greenButton} onClick={saveAccountInfo}>Lưu thông tin</button></div><div style={S.formBox}><h2>Đổi mật khẩu</h2><input style={S.input} type="password" autoComplete="current-password" placeholder="Mật khẩu hiện tại" value={accountForm.oldPassword} onChange={e => setAccountForm(o => ({ ...o, oldPassword: e.target.value }))} /><input style={S.input} type="password" autoComplete="new-password" placeholder="Mật khẩu mới" value={accountForm.newPassword} onChange={e => setAccountForm(o => ({ ...o, newPassword: e.target.value }))} /><input style={S.input} type="password" autoComplete="new-password" placeholder="Nhập lại mật khẩu mới" value={accountForm.confirmNewPassword} onChange={e => setAccountForm(o => ({ ...o, confirmNewPassword: e.target.value }))} /><button style={S.button} onClick={changePassword}>Đổi mật khẩu</button></div></main> : <main style={S.container}><div style={S.tableBox}>Vui lòng đăng nhập để xem tài khoản.</div></main>;
 
@@ -354,7 +410,7 @@ function App() {
     {managementTab === "products" && <><div style={S.formBox}>{editingProduct && <><h2>Chỉnh sửa sản phẩm</h2><input style={S.input} placeholder="Tên sản phẩm" value={editProduct.name} onChange={e => setEditProduct(o => ({ ...o, name: e.target.value }))} /><select style={S.input} value={editProduct.category} onChange={e => setEditProduct(o => ({ ...o, category: e.target.value }))}>{CATEGORIES.filter(c => c !== "Tất cả").map(c => <option key={c}>{c}</option>)}</select><input style={S.input} type="number" min="0" placeholder="Giá" value={editProduct.price} onChange={e => setEditProduct(o => ({ ...o, price: e.target.value }))} /><input style={S.input} type="number" min="0" placeholder="Tồn kho" value={editProduct.stock} onChange={e => setEditProduct(o => ({ ...o, stock: e.target.value }))} /><textarea style={{ ...S.input, minHeight: 100 }} placeholder="Mô tả" value={editProduct.description} onChange={e => setEditProduct(o => ({ ...o, description: e.target.value }))} /><input type="file" accept="image/*" onChange={e => handleImage(e, "edit")} /><div style={{ marginTop: 15 }}><button style={S.greenButton} onClick={saveEditProduct}>Lưu thay đổi</button><button style={{ ...S.dangerButton, marginLeft: 8 }} onClick={() => setEditingProduct(null)}>Hủy</button></div></>}
       <h2>{editingProduct ? "Thêm sản phẩm mới" : "Thêm sản phẩm"}</h2><input style={S.input} placeholder="Tên sản phẩm" value={newProduct.name} onChange={e => setNewProduct(o => ({ ...o, name: e.target.value }))} /><select style={S.input} value={newProduct.category} onChange={e => setNewProduct(o => ({ ...o, category: e.target.value }))}>{CATEGORIES.filter(c => c !== "Tất cả").map(c => <option key={c}>{c}</option>)}</select><input style={S.input} type="number" min="0" placeholder="Giá sản phẩm" value={newProduct.price} onChange={e => setNewProduct(o => ({ ...o, price: e.target.value }))} /><input style={S.input} type="number" min="0" placeholder="Số lượng tồn kho" value={newProduct.stock} onChange={e => setNewProduct(o => ({ ...o, stock: e.target.value }))} /><textarea style={{ ...S.input, minHeight: 100 }} placeholder="Mô tả sản phẩm" value={newProduct.description} onChange={e => setNewProduct(o => ({ ...o, description: e.target.value }))} /><input type="file" accept="image/*" onChange={e => handleImage(e, "new")} />{newProduct.image && <img src={newProduct.image} alt="Xem trước" style={{ width: 150, height: 150, objectFit: "cover", display: "block", marginTop: 15, borderRadius: 10 }} />}<br /><button style={S.greenButton} onClick={addProduct}>Thêm sản phẩm</button></div><div style={S.tableBox}><h2>Danh sách sản phẩm</h2><table style={S.table}><thead><tr><th style={S.th}>Ảnh</th><th style={S.th}>Tên</th><th style={S.th}>Danh mục</th><th style={S.th}>Giá</th><th style={S.th}>Tồn kho</th><th style={S.th}>Thao tác</th></tr></thead><tbody>{products.map(p => <tr key={p.id}><td style={S.td}><img src={p.image} alt={p.name} style={{ width: 60, height: 60, objectFit: "cover", borderRadius: 6 }} /></td><td style={S.td}>{p.name}</td><td style={S.td}>{p.category}</td><td style={S.td}>{money(p.price)}</td><td style={S.td}>{p.stock}</td><td style={S.td}><button style={S.button} onClick={() => startEditProduct(p)}>Chỉnh sửa</button>{canDelete && <button style={{ ...S.dangerButton, marginLeft: 8 }} onClick={() => deleteProduct(p.id)}>Xóa</button>}</td></tr>)}</tbody></table></div></>}
     {managementTab === "orders" && <div style={S.tableBox}><h2>Quản lý đơn hàng</h2>{orders.length === 0 ? <p>Chưa có đơn hàng.</p> : orders.map(order => <div key={order.id} style={{ border: "1px solid #ddd", borderRadius: 10, padding: 20, marginBottom: 20 }}><h3>Đơn hàng #{order.id}</h3><p>Khách hàng: <strong>{order.customerName}</strong></p><p>Tài khoản: {order.username}</p><p>Email: {order.email}</p><p>Số điện thoại: {order.phone}</p><p>Địa chỉ: {order.address}</p><p>Ngày đặt: {order.createdAt}</p><p>Thanh toán: {order.paymentMethod || PAYMENT_METHODS[0]}</p><select value={order.status} onChange={e => updateOrderStatus(order.id, e.target.value)} style={{ padding: 10, borderRadius: 6, marginBottom: 15 }}>{ORDER_STATUSES.map(s => <option key={s}>{s}</option>)}</select>{order.products.map(item => <div key={item.id} style={{ display: "flex", gap: 15, alignItems: "center", marginBottom: 12 }}><img src={item.image} alt={item.name} style={{ width: 70, height: 70, objectFit: "cover", borderRadius: 7 }} /><div><strong>{item.name}</strong><p>Số lượng: {item.quantity}</p><p>Giá: {money(item.price)}</p></div></div>)}<h3>Tổng tiền: {money(order.total)}</h3>{canDelete && <button style={S.dangerButton} onClick={() => deleteOrder(order.id)}>Xóa đơn hàng</button>}</div>)}</div>}
-    {managementTab === "users" && canManageUsers && <div style={S.tableBox}><h2>Quản lý tài khoản</h2><input style={{ ...S.input, maxWidth: 500 }} placeholder="🔍 Tìm tài khoản, email, tên..." value={userSearch} onChange={e => setUserSearch(e.target.value)} /><table style={S.table}><thead><tr><th style={S.th}>Tài khoản</th><th style={S.th}>Tên</th><th style={S.th}>Email</th><th style={S.th}>Vai trò</th><th style={S.th}>Thao tác</th></tr></thead><tbody>{users.filter(u => `${u.username} ${u.email} ${u.name}`.toLowerCase().includes(userSearch.toLowerCase())).map(u => <tr key={u.id}><td style={S.td}>{u.username}</td><td style={S.td}>{u.name}</td><td style={S.td}>{u.email}</td><td style={S.td}><select disabled={u.id === currentUser.id} value={u.role} onChange={e => updateUserRole(u.id, e.target.value)}><option value="customer">Khách hàng</option><option value="staff">Nhân viên</option><option value="manager">Quản lý</option><option value="admin">Quản trị viên</option></select></td><td style={S.td}>{u.id !== currentUser.id && <button style={S.dangerButton} onClick={() => deleteUser(u.id)}>Xóa</button>}</td></tr>)}</tbody></table></div>}
+    {managementTab === "users" && canManageUsers && <div style={S.tableBox}><h2>Quản lý tài khoản</h2><input style={{ ...S.input, maxWidth: 500 }} placeholder="🔍 Tìm tài khoản, email, tên..." value={userSearch} onChange={e => setUserSearch(e.target.value)} /><table style={S.table}><thead><tr><th style={S.th}>Tài khoản</th><th style={S.th}>Tên</th><th style={S.th}>Email</th><th style={S.th}>Vai trò</th><th style={S.th}>Thao tác</th></tr></thead><tbody>{users.filter(u => `${u.username} ${u.email} ${u.name}`.toLowerCase().includes(userSearch.toLowerCase())).map(u => <tr key={u.id}><td style={S.td}>{u.username}</td><td style={S.td}>{u.name}</td><td style={S.td}>{u.email}</td><td style={S.td}><select disabled={u.id === currentUser.id} value={u.role} onChange={e => updateUserRole(u.id, e.target.value)}><option value="customer">Khách hàng</option><option value="staff">Nhân viên</option><option value="admin">Quản trị viên</option></select></td><td style={S.td}>{u.id !== currentUser.id && <button style={S.dangerButton} onClick={() => deleteUser(u.id)}>Xóa</button>}</td></tr>)}</tbody></table></div>}
   </main> : <main style={S.container}><div style={S.tableBox}><h2>Bạn không có quyền truy cập!</h2></div></main>;
 
   const footer = <footer style={S.footer}><p>© 2026 THANHCONG.BOUTIQUE</p><p>Thời trang dành cho phong cách của bạn.</p><p>Hotline hỗ trợ: 0900 000 000 | Email: support@thanhcong.com</p></footer>;
@@ -368,7 +424,7 @@ function App() {
   if (page === "checkout") content = checkoutPage;
   if (page === "orders") content = ordersPage;
   if (page === "favorites") content = favoritesPage;
-  if (["management", "admin", "staff", "manager"].includes(page)) content = managementPage;
+  if (["management", "admin", "staff"].includes(page)) content = managementPage;
 
   return <div style={S.page}><style>{`@media (max-width: 700px) { .tc-grid-detail { grid-template-columns: 1fr !important; } .tc-search-grid { grid-template-columns: 1fr !important; } } button:disabled { opacity: .55; cursor: not-allowed; } details summary::-webkit-details-marker { color: #111827; }`}</style>{header}{content}{footer}</div>;
 }
